@@ -3,6 +3,7 @@ export type ComposeMessage = {
     width: number;
     height: number;
     alphaBuffer: ArrayBuffer;
+    alphaByteOffset: number;
     alphaLength: number;
     bitmap: ImageBitmap;
     previewMax: number;

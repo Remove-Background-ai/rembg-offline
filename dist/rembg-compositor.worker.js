@@ -5,10 +5,10 @@ self.onmessage = async (evt) => {
     if (!data || data.type !== 'compose')
         return;
     try {
-        const { width, height, alphaBuffer, alphaLength, bitmap, previewMax } = data;
+        const { width, height, alphaBuffer, alphaByteOffset, alphaLength, bitmap, previewMax } = data;
         if (!width || !height || !bitmap)
             throw new Error('Invalid compose arguments');
-        const alpha = new Uint8Array(alphaBuffer);
+        const alpha = new Uint8Array(alphaBuffer, alphaByteOffset, alphaLength);
         if (alpha.length !== alphaLength)
             throw new Error('Alpha length mismatch');
         const canvas = new OffscreenCanvas(width, height);

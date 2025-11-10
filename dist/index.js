@@ -19,9 +19,9 @@ self.onmessage = async (evt) => {
   const data = evt.data;
   if (!data || data.type !== 'compose') return;
   try {
-    const { width, height, alphaBuffer, alphaLength, bitmap, previewMax } = data;
+    const { width, height, alphaBuffer, alphaByteOffset, alphaLength, bitmap, previewMax } = data;
     if (!width || !height || !bitmap) throw new Error('Invalid compose arguments');
-    const alpha = new Uint8Array(alphaBuffer);
+    const alpha = new Uint8Array(alphaBuffer, alphaByteOffset, alphaLength);
     if (alpha.length !== alphaLength) throw new Error('Alpha length mismatch');
     if (typeof OffscreenCanvas === 'undefined') throw new Error('OffscreenCanvas not supported');
 
@@ -125,6 +125,7 @@ self.onmessage = async (evt) => {
                 width,
                 height,
                 alphaBuffer: alpha.buffer,
+                alphaByteOffset: alpha.byteOffset,
                 alphaLength: alpha.length,
                 bitmap,
                 previewMax: 450,
