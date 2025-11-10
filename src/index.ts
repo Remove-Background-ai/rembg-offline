@@ -22,22 +22,101 @@ async function composeOffMainThread(
 ): Promise<{ mainBlob: Blob; previewBlob: Blob }> {
   return new Promise((resolve, reject) => {
     try {
-      // Vite/Webpack-friendly worker import via URL
-      // Note: Use .js extension because tsc compiles .ts -> .js but doesn't transform URL strings
-      const worker = new Worker(new URL("./rembg-compositor.worker.js", import.meta.url), { type: "module" });
+      // Helper to create a compositor worker with robust fallback
+      const createCompositorWorker = (): { worker: Worker; revokeUrl?: string } => {
+        // 1) Try bundler-friendly URL (ESM worker). Works in Vite/Webpack when node_modules is processed.
+        try {
+          const w = new Worker(new URL("./rembg-compositor.worker.js", import.meta.url), { type: "module" });
+          return { worker: w };
+        } catch (_err) {
+          // 2) Fallback to inline classic worker (no imports; pure JS)
+          const inline = `
+self.onmessage = async (evt) => {
+  const data = evt.data;
+  if (!data || data.type !== 'compose') return;
+  try {
+    const { width, height, alphaBuffer, alphaLength, bitmap, previewMax } = data;
+    if (!width || !height || !bitmap) throw new Error('Invalid compose arguments');
+    const alpha = new Uint8Array(alphaBuffer);
+    if (alpha.length !== alphaLength) throw new Error('Alpha length mismatch');
+    if (typeof OffscreenCanvas === 'undefined') throw new Error('OffscreenCanvas not supported');
+
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('2D context unavailable');
+    ctx.drawImage(bitmap, 0, 0);
+
+    const H_CHUNK = 512;
+    for (let y0 = 0; y0 < height; y0 += H_CHUNK) {
+      const h = Math.min(H_CHUNK, height - y0);
+      const strip = ctx.getImageData(0, y0, width, h);
+      const dataRGBA = strip.data;
+      const start = y0 * width;
+      for (let row = 0; row < h; row++) {
+        const rowStartAlpha = start + row * width;
+        const rowStartRGBA = row * width * 4;
+        for (let x = 0; x < width; x++) {
+          dataRGBA[rowStartRGBA + x * 4 + 3] = alpha[rowStartAlpha + x];
+        }
+      }
+      ctx.putImageData(strip, 0, y0);
+    }
+
+    // Prefer PNG for reliable alpha; validate blob size
+    let mainBlob = await canvas.convertToBlob({ type: 'image/png', quality: 0.95 });
+    if (!mainBlob || mainBlob.size < 500) {
+      // Attempt a secondary encode path if suspiciously small
+      mainBlob = await canvas.convertToBlob({ type: 'image/png' });
+    }
+
+    // Build preview (PNG)
+    const maxSide = Math.max(width, height);
+    const scale = Math.min(1, previewMax / maxSide);
+    const pW = Math.max(1, Math.round(width * scale));
+    const pH = Math.max(1, Math.round(height * scale));
+    const pCanvas = new OffscreenCanvas(pW, pH);
+    const pCtx = pCanvas.getContext('2d', { willReadFrequently: true });
+    if (!pCtx) throw new Error('2D context unavailable (preview)');
+    pCtx.drawImage(canvas, 0, 0, pW, pH);
+    let previewBlob = await pCanvas.convertToBlob({ type: 'image/png', quality: 0.6 });
+    if (!previewBlob || previewBlob.size < 100) {
+      previewBlob = await pCanvas.convertToBlob({ type: 'image/png' });
+    }
+
+    try { bitmap?.close?.(); } catch {}
+    self.postMessage({ type: 'result', mainBlob, previewBlob });
+  } catch (err) {
+    self.postMessage({ type: 'error', message: err?.message || String(err) });
+  }
+};
+`;
+          const blob = new Blob([inline], { type: "text/javascript" });
+          const url = URL.createObjectURL(blob);
+          const w = new Worker(url); // classic worker
+          return { worker: w, revokeUrl: url };
+        }
+      };
+
+      const { worker, revokeUrl } = createCompositorWorker();
       const cleanup = () => { try { worker.terminate(); } catch {} };
       worker.onmessage = (evt: MessageEvent<any>) => {
         const data = evt.data;
         if (!data) return;
         if (data.type === 'result') {
           cleanup();
+          if (revokeUrl) { try { URL.revokeObjectURL(revokeUrl); } catch {} }
           resolve({ mainBlob: data.mainBlob as Blob, previewBlob: data.previewBlob as Blob });
         } else if (data.type === 'error') {
           cleanup();
+          if (revokeUrl) { try { URL.revokeObjectURL(revokeUrl); } catch {} }
           reject(new Error(String(data.message)));
         }
       };
-      worker.onerror = (err) => { cleanup(); reject(err as any); };
+      worker.onerror = (err) => {
+        cleanup();
+        if (revokeUrl) { try { URL.revokeObjectURL(revokeUrl); } catch {} }
+        reject(err as any);
+      };
       worker.postMessage(
         {
           type: 'compose',
