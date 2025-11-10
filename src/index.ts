@@ -23,7 +23,8 @@ async function composeOffMainThread(
   return new Promise((resolve, reject) => {
     try {
       // Vite/Webpack-friendly worker import via URL
-      const worker = new Worker(new URL("./rembg-compositor.worker.ts", import.meta.url), { type: "module" });
+      // Note: Use .js extension because tsc compiles .ts -> .js but doesn't transform URL strings
+      const worker = new Worker(new URL("./rembg-compositor.worker.js", import.meta.url), { type: "module" });
       const cleanup = () => { try { worker.terminate(); } catch {} };
       worker.onmessage = (evt: MessageEvent<any>) => {
         const data = evt.data;
@@ -138,8 +139,9 @@ export async function removeBackground(url: string): Promise<RemoveBackgroundRes
       ctx.putImageData(strip, 0, y0);
     }
 
+    // Use PNG instead of WebP - better alpha channel support across browsers
     mainBlob = await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/webp", 0.95)
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png", 0.95)
     );
 
     const previewCanvas = document.createElement("canvas");

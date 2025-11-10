@@ -36,7 +36,7 @@ async function handleFile(file: File) {
   const url = URL.createObjectURL(file);
   try {
     const result = await removeBackground(url);
-    // result.blobUrl (full res, webp), result.previewUrl (small), result.width/height
+    // result.blobUrl (full res, png), result.previewUrl (small preview, png), result.width/height
     const img = document.querySelector('#result') as HTMLImageElement;
     img.src = result.blobUrl;
   } finally {

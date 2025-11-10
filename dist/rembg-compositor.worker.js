@@ -29,7 +29,8 @@ self.onmessage = async (evt) => {
             }
             ctx.putImageData(strip, 0, y0);
         }
-        const mainBlob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.95 });
+        // Use PNG instead of WebP - better alpha channel support in OffscreenCanvas
+        const mainBlob = await canvas.convertToBlob({ type: 'image/png', quality: 0.95 });
         // Build preview
         const maxSide = Math.max(width, height);
         const scale = Math.min(1, previewMax / maxSide);
