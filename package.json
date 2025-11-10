@@ -12,7 +12,8 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build"
   },
   "peerDependencies": {
     "@huggingface/transformers": "^3 || ^4"
