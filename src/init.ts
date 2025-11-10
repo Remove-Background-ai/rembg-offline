@@ -1,0 +1,199 @@
+import { AutoModel, AutoProcessor, env } from "@huggingface/transformers";
+import { onnxProgress } from "./progress";
+
+// HMR-safe guard for browser environments (library consumers may HMR)
+declare global {
+  interface Window { __rembg_offline_fetch_patched__?: boolean; }
+}
+
+// Track the current active init session to correctly attribute progress
+let activeSessionId = 0;
+let cachedLoad: Promise<{ model: any; processor: any }> | null = null;
+let originalFetch: typeof window.fetch | null = null;
+
+// single-flight + memory cache for ONNX responses (avoid redownloading)
+const inflight = new Map<string, Promise<ArrayBuffer>>();
+const memCache = new Map<string, ArrayBuffer>();
+
+// Match ONNX files coming from the HF hosting used by transformers.js
+const ONNX_PATH_HINT = "/onnx/";
+
+// Simplified device selection
+type Device = 'webgpu' | 'wasm';
+let forceWasmNext = false;
+
+export function forceWASMMode() {
+  forceWasmNext = true;
+  cachedLoad = null;
+}
+
+function patchFetchOnce() {
+  if (typeof window === "undefined") return; // SSR guard
+  if ((window as any).__rembg_offline_fetch_patched__) return;
+  (window as any).__rembg_offline_fetch_patched__ = true;
+
+  originalFetch = window.fetch.bind(window);
+  window.fetch = async (resource: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(resource);
+    // Only intercept ONNX model files to track download progress
+    if (!url.includes(ONNX_PATH_HINT)) {
+      return (originalFetch as any)(resource, init);
+    }
+
+    // Serve from memory cache instantly (progress -> near complete)
+    if (memCache.has(url)) {
+      const buf = memCache.get(url)!;
+      onnxProgress.setNetworkProgress(99, activeSessionId);
+      return new Response(buf, {
+        headers: { "content-type": "application/octet-stream", "content-length": String(buf.byteLength) },
+        status: 200
+      });
+    }
+
+    // If another init is already fetching, stream from its result
+    if (inflight.has(url)) {
+      const bufPromise = inflight.get(url)!;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const buf = await bufPromise;
+          controller.enqueue(new Uint8Array(buf));
+          controller.close();
+        }
+      });
+      return new Response(stream, { headers: { "content-type": "application/octet-stream" }, status: 200 });
+    }
+
+    // First real download for this URL
+    onnxProgress.setNetworkProgress(0, activeSessionId);
+
+    const res = await (originalFetch as any)(resource, init);
+    if (!res.body) return res;
+
+    const total = Number(res.headers.get("content-length") || 0);
+    let loaded = 0;
+    const chunks: Uint8Array[] = [];
+
+    let resolveBuf!: (v: ArrayBuffer) => void;
+    let rejectBuf!: (e: any) => void;
+    const bufPromise = new Promise<ArrayBuffer>((resolve, reject) => {
+      resolveBuf = resolve; rejectBuf = reject;
+    });
+    inflight.set(url, bufPromise);
+
+    const reader = res.body.getReader();
+    const tracked = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            onnxProgress.setNetworkProgress(99, activeSessionId);
+            const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
+            const merged = new Uint8Array(totalLen);
+            let off = 0; for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+            const buf = merged.buffer;
+            memCache.set(url, buf);
+            inflight.delete(url);
+            resolveBuf(buf);
+            controller.close();
+            return;
+          }
+          if (value) {
+            controller.enqueue(value);
+            chunks.push(value);
+            if (total > 0) {
+              loaded += value.byteLength;
+              const pct = Math.min(99, Math.floor((loaded / total) * 100));
+              onnxProgress.setNetworkProgress(pct, activeSessionId);
+            }
+          }
+        } catch (e) {
+          inflight.delete(url);
+          onnxProgress.setError(activeSessionId, (e as any)?.message || String(e));
+          rejectBuf(e);
+          throw e;
+        }
+      },
+      cancel(reason) { try { reader.cancel(reason); } catch {} }
+    });
+
+    return new Response(tracked, { status: res.status, statusText: res.statusText, headers: res.headers });
+  };
+}
+
+async function testWebGPUAvailability(): Promise<boolean> {
+  try {
+    // Skip if not in browser or no navigator.gpu
+    const gpu = (globalThis as any).navigator?.gpu;
+    if (!gpu) return false;
+    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
+
+async function selectDevice(): Promise<Device> {
+  if (forceWasmNext) return 'wasm';
+  const ok = await testWebGPUAvailability();
+  return ok ? 'webgpu' : 'wasm';
+}
+
+export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ model: any; processor: any }> {
+  patchFetchOnce();
+  if (cachedLoad) return cachedLoad;
+
+  // transformers.js env – avoid local models, allow browser caches
+  env.allowLocalModels = false;
+  env.useBrowserCache = true;
+
+  cachedLoad = (async () => {
+    const sessionId = onnxProgress.beginNewSession();
+    activeSessionId = sessionId;
+    try {
+      if (setModelLoaded) setModelLoaded(false);
+
+      let device: Device = await selectDevice();
+      // Always fp32 (fp16 detection varies widely)
+      const modelOptions: any = {
+        config: { model_type: "custom" },
+        device,
+        dtype: 'fp32',
+      };
+      if (device === 'wasm') {
+        modelOptions.executionProviders = ['wasm'];
+        modelOptions.dtype = 'fp32';
+      }
+
+      // Load model → after bytes fetched, we transition to "building"
+      const model = await AutoModel.from_pretrained("briaai/RMBG-1.4", modelOptions);
+      onnxProgress.setBuilding(sessionId);
+      const processor = await AutoProcessor.from_pretrained("briaai/RMBG-1.4", {
+        config: {
+          do_normalize: true,
+          do_pad: false,
+          do_rescale: true,
+          do_resize: true,
+          image_mean: [0.5, 0.5, 0.5],
+          image_std: [1, 1, 1],
+          resample: 2,
+          rescale_factor: 0.00392156862745098,
+          size: { width: 1024, height: 1024 }
+        }
+      });
+
+      onnxProgress.setReady(sessionId);
+      if (setModelLoaded) setModelLoaded(true);
+      forceWasmNext = false; // reset flag if previously set
+      return { model, processor };
+    } catch (e: any) {
+      cachedLoad = null;
+      onnxProgress.setError(activeSessionId, e?.message || String(e));
+      if (setModelLoaded) setModelLoaded(false);
+      throw e;
+    }
+  })();
+
+  return cachedLoad;
+}
+
+
