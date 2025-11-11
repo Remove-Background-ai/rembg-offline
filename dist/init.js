@@ -143,8 +143,8 @@ export async function init(setModelLoaded) {
             if (setModelLoaded)
                 setModelLoaded(false);
             let device = await selectDevice();
-            // Detect FP16 support when using WebGPU, fallback to FP32
-            let dtype = 'fp32';
+            // Check FP16 capability FIRST for WebGPU, fallback to FP32 only if unavailable
+            let dtype;
             if (device === 'webgpu') {
                 try {
                     const precisionResult = await getPrecisionCapability();
@@ -153,6 +153,7 @@ export async function init(setModelLoaded) {
                         console.log("Using FP16 precision for faster inference");
                     }
                     else {
+                        dtype = 'fp32';
                         console.log("FP16 not supported, using FP32 precision");
                     }
                 }
@@ -160,6 +161,10 @@ export async function init(setModelLoaded) {
                     console.warn('Could not determine FP16 capability, using FP32:', precisionErr);
                     dtype = 'fp32';
                 }
+            }
+            else {
+                // WASM doesn't support FP16, use FP32
+                dtype = 'fp32';
             }
             const modelOptions = {
                 config: { model_type: "custom" },
