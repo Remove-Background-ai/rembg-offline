@@ -1,5 +1,5 @@
 # rembg-webgpu
-Blazing fast and accurate Background removal for the Web.
+Blazing fast and Robust Background removal for the Web.
 
 **[🚀 Try Live Demo](https://www.rembg.com/en/free-background-remover)** – See it in action with your own images
 
@@ -85,9 +85,9 @@ const result = await removeBackground(imageUrl);
 // Clean up when done
 unsubscribe();
 ```
-## Full Documentation
+## Full Documentation & walkthrough guide
 
-[www.rembg.com/rembg-webgpu](https://www.rembg.com/rembg-webgpu)
+[rembg.com's blog](https://www.rembg.com/en/blog/remove-backgrounds-browser-rembg-webgpu)
 
 ## Technical Details
 
