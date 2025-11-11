@@ -1,5 +1,6 @@
 import { AutoModel, AutoProcessor, env } from "@huggingface/transformers";
 import { onnxProgress } from "./progress";
+import { getPrecisionCapability } from "./utils";
 
 // HMR-safe guard for browser environments (library consumers may HMR)
 declare global {
@@ -153,16 +154,36 @@ export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ mod
       if (setModelLoaded) setModelLoaded(false);
 
       let device: Device = await selectDevice();
-      // Always fp32 (fp16 detection varies widely)
+      
+      // Detect FP16 support when using WebGPU, fallback to FP32
+      let dtype: 'fp16' | 'fp32' = 'fp32';
+      if (device === 'webgpu') {
+        try {
+          const precisionResult = await getPrecisionCapability();
+          if (precisionResult.hasFP16) {
+            dtype = 'fp16';
+            console.log("Using FP16 precision for faster inference");
+          } else {
+            console.log("FP16 not supported, using FP32 precision");
+          }
+        } catch (precisionErr) {
+          console.warn('Could not determine FP16 capability, using FP32:', precisionErr);
+          dtype = 'fp32';
+        }
+      }
+
       const modelOptions: any = {
         config: { model_type: "custom" },
         device,
-        dtype: 'fp32',
+        dtype,
       };
+      
       if (device === 'wasm') {
         modelOptions.executionProviders = ['wasm'];
         modelOptions.dtype = 'fp32';
       }
+
+      console.log("Model initialization options:", { device, dtype });
 
       // Load model → after bytes fetched, we transition to "building"
       const model = await AutoModel.from_pretrained("briaai/RMBG-1.4", modelOptions);
