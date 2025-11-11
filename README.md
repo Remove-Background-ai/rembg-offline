@@ -1,88 +1,132 @@
 # rembg-webgpu
+Blazing fast and accurate Background removal for the Web.
 
-Offline background removal for the browser using the `rembg.com`'s Distilled model via `@huggingface/transformers`, with a simple API and downloadable ONNX progress you can hook into for your own loader UI.
-- Advanced monkey patching is used internally to reliably capture and display download progress across different browser environments and fetch implementations
-- No UI included. You build your own file-picker/design.
-- Call one async function; get back a blob URL of the transparent image and a small preview URL.
-- Exported progress API lets you render your own installer-style loader (download/build/ready).
+**[🚀 Try Live Demo](https://www.rembg.com/en/free-background-remover)** – See it in action with your own images
 
-## Why rembbg-webgpu is different?
+## Benchmark
 
-Most browser-based background removers are just thin wrappers around demo code.
-We went deeper.
+Performance benchmarks on M1 MacBook Pro (WebGPU enabled):
 
-rembg-webgpu started from the foundations of @huggingface/transformers, then got rebuilt and optimized into something actually usable for production-like environments.
+| Resolution | Total Time |
+|------------|------------|
+| 1000x1000  | **0.73s**  |
+| 1024×1536  | **0.95s**  |
+| 3000×3000  | **1.40s**  |
+| 5203×7800  | **3.05s**  |
+
+*Note: First-time initialization adds delay for model download and compilation (cached thereafter). WASM fallback is approximately 3-5× slower than WebGPU.*
+
+**Have different hardware?** We'd love to see benchmarks from your device! Submit a PR with your results (include device specs, browser, and whether WebGPU or WASM was used).
+
+# What is it?
+
+**rembg-webgpu** is a production-ready, client-side background removal library that runs entirely in the browser. Built on rembg.com's distilled AI model and powered by `@huggingface/transformers`, it delivers state-of-the-art segmentation without server dependencies or privacy compromises.
+
+**Core Features:**
+- **Intelligent Backend Selection** – Automatically detects and uses the best available backend:
+  - WebGPU with FP16 (shader-f16) for maximum performance
+  - WebGPU with FP32 fallback if FP16 unavailable  
+  - WASM with FP32 as universal fallback
+- **Runtime Capability Detection** – Query device capabilities before initialization via `getCapabilities()`
+- **Zero Server Dependency** – Complete offline processing; your users' images never leave their device
+- **Granular Progress Tracking** – Advanced hooks for download/building/ready phases with percentage progress
+- **Advanced Optimization** – OffscreenCanvas worker-based compositing with automatic main-thread fallback
+- **Smart Caching** – Memory + browser cache for instant subsequent loads
+- **Automatic Preview Generation** – Returns both full-resolution and optimized preview URLs
+- **Headless by Design** – No opinionated UI; bring your own interface and workflows  
+- **TypeScript Native** – Full type safety with exported types for all APIs
+
+## Why rembg-webgpu is Different
+
+Unlike most browser-based background removal solutions that are merely thin wrappers around demo code, **rembg-webgpu** was engineered from the ground up for production environments.
+
+We started with `@huggingface/transformers` as a foundation, then extensively rebuilt and optimized the entire pipeline with:
+- Custom fetch interception for granular download progress tracking
+- Intelligent device capability detection and automatic backend selection
+- Worker-based compositing architecture to keep the main thread responsive
+- Memory-efficient chunked processing for large images
+- Sophisticated caching strategies across memory and browser storage
+
+The result is a library that doesn't just work in demos—it scales to real-world applications with thousands of users.
 
 ## Install
 
-This package expects `@huggingface/transformers` to be available (peer dependency).
 
 ```bash
-npm i rembg-webgpu @huggingface/transformers
+npm i rembg-webgpu
 ```
 
 Your bundler must support web workers via `new URL('./worker.ts', import.meta.url)` (Vite, Webpack 5, etc.).  
 Modern browsers only.
 
-## API
+## Sample code
 
 ```ts
-import { removeBackground, subscribeToProgress, forceWASMMode } from 'rembg-webgpu';
+import { removeBackground, subscribeToProgress, getCapabilities } from 'rembg-webgpu';
 
-// Optional: subscribe to ONNX download/build progress to show a loader
+// Optional: Check device capabilities before initialization
+const capability = await getCapabilities();
+console.log(`Backend: ${capability.device}, Precision: ${capability.dtype}`);
+// Possible results:
+// - { device: 'webgpu', dtype: 'fp16' } - Best performance
+// - { device: 'webgpu', dtype: 'fp32' } - Good performance
+// - { device: 'wasm', dtype: 'fp32' }   - Universal fallback
+
+// Optional: Subscribe to ONNX download/build progress to show a loader
 const unsubscribe = subscribeToProgress(({ phase, progress }) => {
   // phase: 'idle' | 'downloading' | 'building' | 'ready' | 'error'
   // progress: 0..100 (ready sets to 100)
-  // Render your loader based on this state
-  console.log(phase, progress);
+  console.log(`${phase}: ${progress}%`);
 });
 
-// Example: using an <input type="file">
-async function handleFile(file: File) {
-  // Create an object URL (or provide any web-accessible URL)
-  const url = URL.createObjectURL(file);
-  try {
-    const result = await removeBackground(url);
-    // result.blobUrl (full res, png), result.previewUrl (small preview, png), result.width/height
-    const img = document.querySelector('#result') as HTMLImageElement;
-    img.src = result.blobUrl;
-  } finally {
-    // Revoke your input object URL when safe
-    // URL.revokeObjectURL(url);
-  }
-}
+// Remove background from an image
+const result = await removeBackground(imageUrl);
 
-// Optional: if you detect suspicious outputs on this device, call this
-// before the next operation to force WASM (skip WebGPU)
-forceWASMMode();
+// Clean up when done
+unsubscribe();
 ```
+## Full Documentation
 
-### Types
+[www.rembg.com/rembg-webgpu](https://www.rembg.com/rembg-webgpu)
 
-```ts
-type ProgressPhase = 'idle' | 'downloading' | 'building' | 'ready' | 'error';
+## Technical Details
 
-type ProgressState = {
-  phase: ProgressPhase;
-  progress: number;      // 0..100
-  errorMsg?: string;
-  sessionId: number;
-};
+**Backend Selection**
+- Automatically detects WebGPU support and FP16 (shader-f16) capability
+- Falls back gracefully: WebGPU FP16 → WebGPU FP32 → WASM FP32
 
-type RemoveBackgroundResult = {
-  blobUrl: string;       // full-resolution, transparent
-  previewUrl: string;    // <=450px preview
-  width: number;
-  height: number;
-  processingTimeSeconds: number;
-};
-```
+**Performance Optimizations**
+- First call downloads and initializes the model on initial run-up; subsequent calls use memory + browser cache
+- Worker-based OffscreenCanvas compositing offloads processing from main thread
+- Chunked image processing (512px strips) prevents memory spikes on large images
+- Automatic preview generation (≤450px) for instant UI feedback
 
-## Notes
 
-- The first call downloads and initializes the model; subsequent calls are instant from cache.
-- The library attempts to use WebGPU when available, otherwise falls back to WASM.
-- You control input resizing before calling `removeBackground(url)` if you need to cap large dimensions for stability/performance.
-- Blobs are not automatically revoked. Revoke when you no longer need the URLs to avoid memory leaks.
+**Resource Management**
+- You control input image sizing before calling `removeBackground(url)` for optimal performance
+- Blob URLs are not automatically revoked—call `URL.revokeObjectURL()` when done to prevent memory leaks
+- Model weights (~40-50MB) cached in browser after first download
+
+## Roadmap
+
+- [x] WebGPU acceleration with FP16/FP32 precision detection
+- [x] Automatic WASM fallback
+- [x] Runtime device capability detection API
+- [x] Granular progress tracking for model downloads
+- [x] OffscreenCanvas worker-based compositing
+- [x] Memory + browser caching
+- [x] Offline-first architecture
+- [x] Full TypeScript support
+- [ ] Native batch processing API
+- [ ] Custom model support with zero-config
+- [ ] Mobile-optimized version
+
+## Attribution
+
+Background Removal Library provided by [www.rembg.com](https://www.rembg.com)
+
+## License
+
+This project is licensed under the RemBG Attribution License (MIT-Compatible). See the [LICENSE](LICENSE) file for details.
 
 

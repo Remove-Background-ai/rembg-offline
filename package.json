@@ -1,14 +1,15 @@
 {
   "name": "rembg-webgpu",
   "version": "0.2.0",
-  "description": "Browser offline background removal using WebGPU",
+  "description": "Browser offline background removal using WebGPU - powered by rembg.com technology",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "scripts": {
@@ -24,16 +25,30 @@
   },
   "keywords": [
     "background-removal",
+    "rembg",
+    "rembg.com",
+    "image-processing",
     "computer-vision",
     "browser",
     "onnx",
     "webgpu",
-    "wasm"
+    "wasm",
+    "offline",
+    "client-side",
+    "transparent-background",
+    "segmentation",
+    "huggingface",
+    "transformers"
   ],
-  "license": "MIT",
+  "author": "Arken AI LLC",
+  "license": "SEE LICENSE IN LICENSE FILE",
   "repository": {
     "type": "git",
-    "url": "https://example.com/your/repo.git"
+    "url": "https://github.com/Remove-Background-ai/rembg-webgpu.git"
+  },
+  "homepage": "https://www.rembg.com",
+  "bugs": {
+    "url": "https://github.com/Remove-Background-ai/rembg-webgpu/issues"
   }
 }
 
