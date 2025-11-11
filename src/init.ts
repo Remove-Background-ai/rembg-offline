@@ -1,5 +1,6 @@
 import { AutoModel, AutoProcessor, env } from "@huggingface/transformers";
-import { onnxProgress } from "./progress";
+import { onnxProgress } from "./progress.js";
+import { getCapabilities } from "./capabilities.js";
 
 // HMR-safe guard for browser environments (library consumers may HMR)
 declare global {
@@ -17,15 +18,6 @@ const memCache = new Map<string, ArrayBuffer>();
 
 // Match ONNX files coming from the HF hosting used by transformers.js
 const ONNX_PATH_HINT = "/onnx/";
-
-// Simplified device selection
-type Device = 'webgpu' | 'wasm';
-let forceWasmNext = false;
-
-export function forceWASMMode() {
-  forceWasmNext = true;
-  cachedLoad = null;
-}
 
 function patchFetchOnce() {
   if (typeof window === "undefined") return; // SSR guard
@@ -120,40 +112,6 @@ function patchFetchOnce() {
   };
 }
 
-/**
- * Checks WebGPU availability and FP16 support in one pass.
- * Returns both device availability and precision capability to avoid duplicate adapter requests.
- */
-async function checkWebGPUCapabilities(): Promise<{ hasWebGPU: boolean; hasFP16: boolean }> {
-  try {
-    // Skip if not in browser or no navigator.gpu
-    const gpu = (globalThis as any).navigator?.gpu;
-    if (!gpu) return { hasWebGPU: false, hasFP16: false };
-    
-    // Try to reuse adapter from transformers.js env first
-    //@ts-ignore
-    let adapter = env.backends.webgpu?.adapter;
-    
-    if (!adapter) {
-      adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-    }
-    
-    if (!adapter) return { hasWebGPU: false, hasFP16: false };
-    
-    // Check for FP16 support while we have the adapter
-    const hasFP16 = adapter.features.has("shader-f16");
-    
-    return { hasWebGPU: true, hasFP16 };
-  } catch {
-    return { hasWebGPU: false, hasFP16: false };
-  }
-}
-
-async function selectDevice(): Promise<Device> {
-  if (forceWasmNext) return 'wasm';
-  const capabilities = await checkWebGPUCapabilities();
-  return capabilities.hasWebGPU ? 'webgpu' : 'wasm';
-}
 
 export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ model: any; processor: any }> {
   patchFetchOnce();
@@ -169,23 +127,17 @@ export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ mod
     try {
       if (setModelLoaded) setModelLoaded(false);
 
-      // Check WebGPU and FP16 capabilities in one pass to avoid duplicate adapter requests
-      const capabilities = await checkWebGPUCapabilities();
-      const device: Device = forceWasmNext ? 'wasm' : (capabilities.hasWebGPU ? 'webgpu' : 'wasm');
+      // Get the best available device and precision
+      const capability = await getCapabilities();
+      const { device, dtype } = capability;
       
-      // Determine precision: check FP16 FIRST, fallback to FP32 only if unavailable
-      let dtype: 'fp16' | 'fp32';
-      if (device === 'webgpu') {
-        if (capabilities.hasFP16) {
-          dtype = 'fp16';
-          console.log("Using FP16 precision for faster inference");
-        } else {
-          dtype = 'fp32';
-          console.log("FP16 not supported, using FP32 precision");
-        }
+      // Log what we're using
+      if (device === 'webgpu' && dtype === 'fp16') {
+        console.log("[rembg] ✅ Using WebGPU with FP16 precision (shader-f16 supported)");
+      } else if (device === 'webgpu' && dtype === 'fp32') {
+        console.log("[rembg] ⚠️ Using WebGPU with FP32 precision (shader-f16 not available)");
       } else {
-        // WASM doesn't support FP16, use FP32
-        dtype = 'fp32';
+        console.log("[rembg] Using WASM backend with FP32");
       }
 
       const modelOptions: any = {
@@ -196,10 +148,9 @@ export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ mod
       
       if (device === 'wasm') {
         modelOptions.executionProviders = ['wasm'];
-        modelOptions.dtype = 'fp32';
       }
 
-      console.log("Model initialization options:", { device, dtype });
+      console.log("[rembg] 🚀 Model initialization:", capability);
 
       // Load model → after bytes fetched, we transition to "building"
       const model = await AutoModel.from_pretrained("briaai/RMBG-1.4", modelOptions);
@@ -220,7 +171,6 @@ export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ mod
 
       onnxProgress.setReady(sessionId);
       if (setModelLoaded) setModelLoaded(true);
-      forceWasmNext = false; // reset flag if previously set
       return { model, processor };
     } catch (e: any) {
       cachedLoad = null;

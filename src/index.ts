@@ -1,9 +1,10 @@
 import { RawImage } from "@huggingface/transformers";
-import { init, forceWASMMode } from "./init";
-import { onnxProgress, type ProgressState, type ProgressPhase } from "./progress";
+import { init } from "./init.js";
+import { onnxProgress, type ProgressState, type ProgressPhase } from "./progress.js";
+import { getCapabilities, type DeviceCapability } from "./capabilities.js";
 
 // Public types
-export type { ProgressState, ProgressPhase };
+export type { ProgressState, ProgressPhase, DeviceCapability };
 
 export type RemoveBackgroundResult = {
   blobUrl: string;        // full-resolution image (transparent background)
@@ -145,10 +146,27 @@ export function subscribeToProgress(listener: (state: ProgressState) => void): (
 }
 
 /**
- * Force the next initialization to use WASM (disables WebGPU attempt on next call).
- * Useful if the device produces a faulty mask with WebGPU.
+ * Get available device and precision capabilities.
+ * Call this to check what backend will be used before initialization.
+ * 
+ * @returns Promise resolving to device capability (webgpu-fp16, webgpu-fp32, or wasm-fp32)
+ * 
+ * @example
+ * ```typescript
+ * const capability = await getCapabilities();
+ * console.log(`Using ${capability.device} with ${capability.dtype}`);
+ * ```
  */
-export { forceWASMMode };
+export { getCapabilities };
+
+/**
+ * Initialize the model (loads it into memory).
+ * Can be called explicitly for eager loading, or will be called automatically on first removeBackground().
+ * 
+ * The model will automatically use the best available backend (WebGPU with FP16 > WebGPU with FP32 > WASM).
+ * Use getCapabilities() to check what will be used before calling init().
+ */
+export { init };
 
 /**
  * Remove background from an image URL.
