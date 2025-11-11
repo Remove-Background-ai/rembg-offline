@@ -17,6 +17,7 @@ export const getPrecisionCapability = async (): Promise<{ hasFP16: boolean; devi
     }
 
     // Try to get adapter from transformers.js env first, otherwise request new one
+    //@ts-ignore
     let adapter = env.backends.webgpu?.adapter;
     
     if (!adapter) {
