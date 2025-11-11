@@ -1,17 +1,24 @@
-# rembg-offline
+# rembg-webgpu
 
-Offline background removal for the browser using the `briaai/RMBG-1.4` model via `@huggingface/transformers`, with a simple API and downloadable ONNX progress you can hook into for your own loader UI.
-
+Offline background removal for the browser using the `rembg.com`'s Distilled model via `@huggingface/transformers`, with a simple API and downloadable ONNX progress you can hook into for your own loader UI.
+- Advanced monkey patching is used internally to reliably capture and display download progress across different browser environments and fetch implementations
 - No UI included. You build your own file-picker/design.
 - Call one async function; get back a blob URL of the transparent image and a small preview URL.
 - Exported progress API lets you render your own installer-style loader (download/build/ready).
+
+## Why rembbg-webgpu is different?
+
+Most browser-based background removers are just thin wrappers around demo code.
+We went deeper.
+
+rembg-webgpu started from the foundations of @huggingface/transformers, then got rebuilt and optimized into something actually usable for production-like environments.
 
 ## Install
 
 This package expects `@huggingface/transformers` to be available (peer dependency).
 
 ```bash
-npm i rembg-offline @huggingface/transformers
+npm i rembg-webgpu @huggingface/transformers
 ```
 
 Your bundler must support web workers via `new URL('./worker.ts', import.meta.url)` (Vite, Webpack 5, etc.).  
@@ -20,7 +27,7 @@ Modern browsers only.
 ## API
 
 ```ts
-import { removeBackground, subscribeToProgress, forceWASMMode } from 'rembg-offline';
+import { removeBackground, subscribeToProgress, forceWASMMode } from 'rembg-webgpu';
 
 // Optional: subscribe to ONNX download/build progress to show a loader
 const unsubscribe = subscribeToProgress(({ phase, progress }) => {
