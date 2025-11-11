@@ -1,6 +1,5 @@
 import { AutoModel, AutoProcessor, env } from "@huggingface/transformers";
 import { onnxProgress } from "./progress";
-import { getPrecisionCapability } from "./utils";
 // Track the current active init session to correctly attribute progress
 let activeSessionId = 0;
 let cachedLoad = null;
@@ -110,24 +109,37 @@ function patchFetchOnce() {
         return new Response(tracked, { status: res.status, statusText: res.statusText, headers: res.headers });
     };
 }
-async function testWebGPUAvailability() {
+/**
+ * Checks WebGPU availability and FP16 support in one pass.
+ * Returns both device availability and precision capability to avoid duplicate adapter requests.
+ */
+async function checkWebGPUCapabilities() {
     try {
         // Skip if not in browser or no navigator.gpu
         const gpu = globalThis.navigator?.gpu;
         if (!gpu)
-            return false;
-        const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-        return !!adapter;
+            return { hasWebGPU: false, hasFP16: false };
+        // Try to reuse adapter from transformers.js env first
+        //@ts-ignore
+        let adapter = env.backends.webgpu?.adapter;
+        if (!adapter) {
+            adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+        }
+        if (!adapter)
+            return { hasWebGPU: false, hasFP16: false };
+        // Check for FP16 support while we have the adapter
+        const hasFP16 = adapter.features.has("shader-f16");
+        return { hasWebGPU: true, hasFP16 };
     }
     catch {
-        return false;
+        return { hasWebGPU: false, hasFP16: false };
     }
 }
 async function selectDevice() {
     if (forceWasmNext)
         return 'wasm';
-    const ok = await testWebGPUAvailability();
-    return ok ? 'webgpu' : 'wasm';
+    const capabilities = await checkWebGPUCapabilities();
+    return capabilities.hasWebGPU ? 'webgpu' : 'wasm';
 }
 export async function init(setModelLoaded) {
     patchFetchOnce();
@@ -142,24 +154,19 @@ export async function init(setModelLoaded) {
         try {
             if (setModelLoaded)
                 setModelLoaded(false);
-            let device = await selectDevice();
-            // Check FP16 capability FIRST for WebGPU, fallback to FP32 only if unavailable
+            // Check WebGPU and FP16 capabilities in one pass to avoid duplicate adapter requests
+            const capabilities = await checkWebGPUCapabilities();
+            const device = forceWasmNext ? 'wasm' : (capabilities.hasWebGPU ? 'webgpu' : 'wasm');
+            // Determine precision: check FP16 FIRST, fallback to FP32 only if unavailable
             let dtype;
             if (device === 'webgpu') {
-                try {
-                    const precisionResult = await getPrecisionCapability();
-                    if (precisionResult.hasFP16) {
-                        dtype = 'fp16';
-                        console.log("Using FP16 precision for faster inference");
-                    }
-                    else {
-                        dtype = 'fp32';
-                        console.log("FP16 not supported, using FP32 precision");
-                    }
+                if (capabilities.hasFP16) {
+                    dtype = 'fp16';
+                    console.log("Using FP16 precision for faster inference");
                 }
-                catch (precisionErr) {
-                    console.warn('Could not determine FP16 capability, using FP32:', precisionErr);
+                else {
                     dtype = 'fp32';
+                    console.log("FP16 not supported, using FP32 precision");
                 }
             }
             else {
