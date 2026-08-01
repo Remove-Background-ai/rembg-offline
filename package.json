@@ -53,5 +53,13 @@
   "homepage": "https://www.rembg.com",
   "bugs": {
     "url": "https://github.com/popjam-io/rembg-webgpu/issues"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "fsevents@2.3.2": true,
+    "fsevents@2.3.3": true,
+    "onnxruntime-node@1.21.0": true,
+    "protobufjs@7.6.5": true,
+    "sharp@0.34.5": true
   }
 }
