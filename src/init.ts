@@ -1,15 +1,21 @@
 import { AutoModel, AutoProcessor, env } from "@huggingface/transformers";
 import { onnxProgress } from "./progress.js";
-import { getCapabilities } from "./capabilities.js";
+import { getCapabilityLadder, isIOS, type CapabilityOptions, type DeviceCapability } from "./capabilities.js";
 
 // HMR-safe guard for browser environments (library consumers may HMR)
 declare global {
   interface Window { __rembg_offline_fetch_patched__?: boolean; }
 }
 
+const MODEL_ID = "briaai/RMBG-1.4";
+const DEFAULT_PROCESS_SIZE = 1024;
+// WASM inference at 1024x1024 exceeds iOS Safari's per-tab memory budget and
+// gets the page reloaded by the OS watchdog; halve the resolution there.
+const IOS_WASM_PROCESS_SIZE = 512;
+
 // Track the current active init session to correctly attribute progress
 let activeSessionId = 0;
-let cachedLoad: Promise<{ model: any; processor: any }> | null = null;
+let cachedLoad: Promise<LoadedModel> | null = null;
 let originalFetch: typeof window.fetch | null = null;
 
 // single-flight + memory cache for ONNX responses (avoid redownloading)
@@ -112,75 +118,198 @@ function patchFetchOnce() {
   };
 }
 
+// Detect a usable Cache API. Safari private browsing exposes `caches` but
+// rejects on open, which would otherwise abort model loading entirely.
+async function browserCacheAvailable(): Promise<boolean> {
+  try {
+    if (typeof caches === "undefined") return false;
+    await caches.open("transformers-cache");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-export async function init(setModelLoaded?: (b: boolean) => void): Promise<{ model: any; processor: any }> {
+export type LoadedModel = {
+  model: any;
+  processor: any;
+  capability: DeviceCapability;
+  processSize: number;
+};
+
+export type InitOptions = {
+  setModelLoaded?: (b: boolean) => void;
+  /** Force a specific backend tier instead of auto-detection (disables fallback). */
+  capability?: DeviceCapability;
+  /** Override the processing resolution (default 1024; 512 on the iOS WASM tier). */
+  processSize?: number;
+  /** Override the automatic WebGPU support check (see isWebGPUSupported). */
+  allowWebGPU?: boolean;
+};
+
+// Backend fallback state. `ladderIndex` only ever moves down (toward WASM);
+// once a tier has produced a valid mask it is marked verified and kept.
+let ladder: DeviceCapability[] = [];
+let ladderIndex = 0;
+let forcedCapability: DeviceCapability | null = null;
+let backendVerified = false;
+let processSizeOverride: number | undefined;
+
+function processSizeFor(cap: DeviceCapability): number {
+  if (processSizeOverride) return processSizeOverride;
+  if (cap.device === 'wasm' && isIOS()) return IOS_WASM_PROCESS_SIZE;
+  return DEFAULT_PROCESS_SIZE;
+}
+
+async function loadTier(cap: DeviceCapability, sessionId: number): Promise<LoadedModel> {
+  const processSize = processSizeFor(cap);
+  console.log(`[rembg] Loading model: device=${cap.device} dtype=${cap.dtype} size=${processSize}`);
+
+  const model = await AutoModel.from_pretrained(MODEL_ID, {
+    config: { model_type: "custom" },
+    device: cap.device,
+    dtype: cap.dtype,
+  } as any);
+  onnxProgress.setBuilding(sessionId);
+  const processor = await AutoProcessor.from_pretrained(MODEL_ID, {
+    config: {
+      do_normalize: true,
+      do_pad: false,
+      do_rescale: true,
+      do_resize: true,
+      image_mean: [0.5, 0.5, 0.5],
+      image_std: [1, 1, 1],
+      resample: 2,
+      rescale_factor: 0.00392156862745098,
+      size: { width: processSize, height: processSize }
+    }
+  });
+
+  return { model, processor, capability: cap, processSize };
+}
+
+async function disposeLoad(load: Promise<LoadedModel> | null) {
+  if (!load) return;
+  try {
+    const { model } = await load;
+    await model?.dispose?.();
+  } catch {}
+}
+
+/** The tier currently in use (null before the first successful init). */
+export function getActiveCapability(): DeviceCapability | null {
+  if (forcedCapability) return forcedCapability;
+  return ladder[ladderIndex] ?? null;
+}
+
+/** Whether the active backend has produced at least one valid mask. */
+export function isBackendVerified(): boolean {
+  return backendVerified;
+}
+
+export function markBackendVerified(): void {
+  backendVerified = true;
+}
+
+function canDemote(): boolean {
+  return !forcedCapability && !backendVerified && ladderIndex + 1 < ladder.length;
+}
+
+/**
+ * Drop to the next tier in the capability ladder (e.g. webgpu/fp16 ->
+ * webgpu/fp32 -> wasm/q8). Used when a backend initializes but then fails or
+ * produces garbage at inference time — which is exactly how broken
+ * WebGPU-on-WebKit combinations manifest. Returns false when there is nothing
+ * left to fall back to, the backend was forced, or it already proved itself.
+ */
+export async function demoteBackend(): Promise<boolean> {
+  if (!canDemote()) return false;
+  const previous = cachedLoad;
+  cachedLoad = null;
+  ladderIndex++;
+  console.warn(`[rembg] Falling back to ${ladder[ladderIndex].device}/${ladder[ladderIndex].dtype}`);
+  await disposeLoad(previous);
+  return true;
+}
+
+/** Reset all backend state (mainly for tests). The next init() re-detects. */
+export async function resetBackend(): Promise<void> {
+  const previous = cachedLoad;
+  cachedLoad = null;
+  ladder = [];
+  ladderIndex = 0;
+  forcedCapability = null;
+  backendVerified = false;
+  await disposeLoad(previous);
+}
+
+export async function init(options?: InitOptions | ((b: boolean) => void)): Promise<LoadedModel> {
+  const opts: InitOptions = typeof options === "function" ? { setModelLoaded: options } : (options ?? {});
   patchFetchOnce();
+
+  if (opts.capability &&
+      (opts.capability.device !== forcedCapability?.device || opts.capability.dtype !== forcedCapability?.dtype)) {
+    await resetBackend();
+    forcedCapability = opts.capability;
+  }
+  if (opts.processSize && opts.processSize !== processSizeOverride) {
+    const forced = forcedCapability;
+    await resetBackend();
+    forcedCapability = forced;
+    processSizeOverride = opts.processSize;
+  }
+
   if (cachedLoad) return cachedLoad;
 
   // transformers.js env – avoid local models, allow browser caches
   env.allowLocalModels = false;
-  env.useBrowserCache = true;
 
   cachedLoad = (async () => {
     const sessionId = onnxProgress.beginNewSession();
     activeSessionId = sessionId;
     try {
-      if (setModelLoaded) setModelLoaded(false);
+      if (opts.setModelLoaded) opts.setModelLoaded(false);
 
-      // Get the best available device and precision
-      const capability = await getCapabilities();
-      const { device, dtype } = capability;
-      
-      // Log what we're using
-      if (device === 'webgpu' && dtype === 'fp16') {
-        console.log("[rembg] ✅ Using WebGPU with FP16 precision (shader-f16 supported)");
-      } else if (device === 'webgpu' && dtype === 'fp32') {
-        console.log("[rembg] ⚠️ Using WebGPU with FP32 precision (shader-f16 not available)");
-      } else {
-        console.log("[rembg] Using WASM backend with FP32");
+      env.useBrowserCache = await browserCacheAvailable();
+
+      if (forcedCapability) {
+        const loaded = await loadTier(forcedCapability, sessionId);
+        onnxProgress.setReady(sessionId);
+        if (opts.setModelLoaded) opts.setModelLoaded(true);
+        return loaded;
       }
 
-      const modelOptions: any = {
-        config: { model_type: "custom" },
-        device,
-        dtype,
-      };
-      
-      if (device === 'wasm') {
-        modelOptions.executionProviders = ['wasm'];
+      if (ladder.length === 0) {
+        const capabilityOptions: CapabilityOptions = { allowWebGPU: opts.allowWebGPU };
+        ladder = await getCapabilityLadder(capabilityOptions);
+        ladderIndex = 0;
       }
 
-      console.log("[rembg] 🚀 Model initialization:", capability);
-
-      // Load model → after bytes fetched, we transition to "building"
-      const model = await AutoModel.from_pretrained("briaai/RMBG-1.4", modelOptions);
-      onnxProgress.setBuilding(sessionId);
-      const processor = await AutoProcessor.from_pretrained("briaai/RMBG-1.4", {
-        config: {
-          do_normalize: true,
-          do_pad: false,
-          do_rescale: true,
-          do_resize: true,
-          image_mean: [0.5, 0.5, 0.5],
-          image_std: [1, 1, 1],
-          resample: 2,
-          rescale_factor: 0.00392156862745098,
-          size: { width: 1024, height: 1024 }
+      // Walk the ladder: a tier that fails to even initialize (session
+      // creation / shader compilation errors) drops to the next one.
+      let lastError: unknown = null;
+      while (ladderIndex < ladder.length) {
+        const cap = ladder[ladderIndex];
+        try {
+          const loaded = await loadTier(cap, sessionId);
+          onnxProgress.setReady(sessionId);
+          if (opts.setModelLoaded) opts.setModelLoaded(true);
+          return loaded;
+        } catch (e) {
+          lastError = e;
+          if (ladderIndex + 1 >= ladder.length) break;
+          console.warn(`[rembg] ${cap.device}/${cap.dtype} failed to initialize, trying next backend`, e);
+          ladderIndex++;
         }
-      });
-
-      onnxProgress.setReady(sessionId);
-      if (setModelLoaded) setModelLoaded(true);
-      return { model, processor };
+      }
+      throw lastError ?? new Error("No usable inference backend");
     } catch (e: any) {
       cachedLoad = null;
       onnxProgress.setError(activeSessionId, e?.message || String(e));
-      if (setModelLoaded) setModelLoaded(false);
+      if (opts.setModelLoaded) opts.setModelLoaded(false);
       throw e;
     }
   })();
 
   return cachedLoad;
 }
-
-

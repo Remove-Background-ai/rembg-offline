@@ -1,10 +1,10 @@
 import { RawImage } from "@huggingface/transformers";
-import { init } from "./init.js";
+import { init, demoteBackend, markBackendVerified, getActiveCapability, resetBackend, type InitOptions, type LoadedModel } from "./init.js";
 import { onnxProgress, type ProgressState, type ProgressPhase } from "./progress.js";
-import { getCapabilities, type DeviceCapability } from "./capabilities.js";
+import { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS, type CapabilityOptions, type DeviceCapability } from "./capabilities.js";
 
 // Public types
-export type { ProgressState, ProgressPhase, DeviceCapability };
+export type { ProgressState, ProgressPhase, DeviceCapability, CapabilityOptions, InitOptions, LoadedModel };
 
 export type RemoveBackgroundResult = {
   blobUrl: string;        // full-resolution image (transparent background)
@@ -13,6 +13,16 @@ export type RemoveBackgroundResult = {
   height: number;
   processingTimeSeconds: number;
 };
+
+// An entirely empty mask from an unverified backend is treated as backend
+// breakage (broken fp16/WebGPU paths yield NaN -> all-zero masks) rather than
+// a legitimately subject-free image, and triggers a fallback.
+function isAllZero(a: Uint8Array): boolean {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== 0) return false;
+  }
+  return true;
+}
 
 // Helper to run compositing in a worker (with OffscreenCanvas) when supported
 async function composeOffMainThread(
@@ -157,16 +167,19 @@ export function subscribeToProgress(listener: (state: ProgressState) => void): (
  * console.log(`Using ${capability.device} with ${capability.dtype}`);
  * ```
  */
-export { getCapabilities };
+export { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS };
 
 /**
  * Initialize the model (loads it into memory).
  * Can be called explicitly for eager loading, or will be called automatically on first removeBackground().
- * 
- * The model will automatically use the best available backend (WebGPU with FP16 > WebGPU with FP32 > WASM).
- * Use getCapabilities() to check what will be used before calling init().
+ *
+ * The model will automatically use the best available backend
+ * (WebGPU FP16 > WebGPU FP32 > WASM q8 > WASM FP32), falling through the
+ * ladder when a tier fails to initialize — which happens on Safari/WebKit
+ * versions whose WebGPU implementation rejects ONNX Runtime's shaders.
+ * Use getCapabilities() to check what will be tried first.
  */
-export { init };
+export { init, getActiveCapability, resetBackend };
 
 /**
  * Remove background from an image URL.
@@ -177,8 +190,6 @@ export { init };
 export async function removeBackground(url: string): Promise<RemoveBackgroundResult> {
   if (!url) throw new Error("URL is empty");
 
-  const { model, processor } = await init();
-
   // Load the image (already resized as needed by the app using this library)
   const image = await RawImage.fromURL(url);
   const originalWidth = image.width;
@@ -186,13 +197,37 @@ export async function removeBackground(url: string): Promise<RemoveBackgroundRes
 
   const start = performance.now();
 
-  // Inference
-  const { pixel_values } = await (processor as any)(image);
-  const { output } = await (model as any)({ input: pixel_values });
+  // Inference, with automatic backend demotion: a tier that throws — or
+  // returns an all-zero mask before it has ever produced a valid one (the
+  // classic silent fp16/WebGPU failure on WebKit) — is swapped for the next
+  // tier down the ladder and the inference is retried. Once a tier produces a
+  // valid mask it is considered verified and never demoted again.
+  let mask: any;
+  for (;;) {
+    const { model, processor } = await init();
+    try {
+      const { pixel_values } = await (processor as any)(image);
+      const { output } = await (model as any)({ input: pixel_values });
 
-  // Prepare alpha mask in original size
-  const maskRaw = await RawImage.fromTensor(output[0].mul(255).to("uint8"));
-  const mask = await maskRaw.resize(originalWidth, originalHeight);
+      const maskRaw = await RawImage.fromTensor(output[0].mul(255).to("uint8"));
+      if (isAllZero(maskRaw.data as Uint8Array) && await demoteBackend()) {
+        continue;
+      }
+      markBackendVerified();
+
+      // Prepare alpha mask in original size
+      mask = await maskRaw.resize(originalWidth, originalHeight);
+      if (maskRaw !== mask) {
+        // GC hint for the intermediate full-size mask
+        (maskRaw as any).data = null;
+      }
+      break;
+    } catch (e) {
+      if (await demoteBackend()) continue;
+      throw e;
+    }
+  }
+
   const alpha = mask.data as Uint8Array;
   if (alpha.length !== originalWidth * originalHeight) {
     throw new Error("Mask size mismatch");

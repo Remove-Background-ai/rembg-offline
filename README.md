@@ -1,6 +1,11 @@
 # rembg-webgpu
 Blazing fast and Robust Background removal for the Web.
 
+> This is [popjam-io's fork](https://github.com/popjam-io/rembg-webgpu) of
+> [Remove-Background-ai/rembg-webgpu](https://github.com/Remove-Background-ai/rembg-webgpu)
+> with Safari (WebKit) and mobile iOS support. See
+> [Safari / iOS support](#safari--ios-support) for details.
+
 **[🚀 Try Live Demo](https://www.rembg.com/en/free-background-remover)** – See it in action with your own images
 
 ## Benchmark
@@ -25,8 +30,12 @@ Performance benchmarks on M1 MacBook Pro (WebGPU enabled):
 **Core Features:**
 - **Intelligent Backend Selection** – Automatically detects and uses the best available backend:
   - WebGPU with FP16 (shader-f16) for maximum performance
-  - WebGPU with FP32 fallback if FP16 unavailable  
-  - WASM with FP32 as universal fallback
+  - WebGPU with FP32 fallback if FP16 unavailable
+  - WASM with the quantized model (q8, ~44MB) as universal fallback
+  - WASM with FP32 as last resort
+- **Runtime Fallback** – A backend that fails to initialize, throws during
+  inference, or silently produces an empty mask (the classic broken-fp16
+  signature) is automatically demoted to the next tier — no hard failures
 - **Runtime Capability Detection** – Query device capabilities before initialization via `getCapabilities()`
 - **Zero Server Dependency** – Complete offline processing; your users' images never leave their device
 - **Granular Progress Tracking** – Advanced hooks for download/building/ready phases with percentage progress
@@ -70,7 +79,8 @@ console.log(`Backend: ${capability.device}, Precision: ${capability.dtype}`);
 // Possible results:
 // - { device: 'webgpu', dtype: 'fp16' } - Best performance
 // - { device: 'webgpu', dtype: 'fp32' } - Good performance
-// - { device: 'wasm', dtype: 'fp32' }   - Universal fallback
+// - { device: 'wasm', dtype: 'q8' }     - Universal fallback (quantized, ~44MB)
+// - { device: 'wasm', dtype: 'fp32' }   - Last resort
 
 // Optional: Subscribe to ONNX download/build progress to show a loader
 const unsubscribe = subscribeToProgress(({ phase, progress }) => {
@@ -89,11 +99,42 @@ unsubscribe();
 
 [rembg.com's blog](https://www.rembg.com/en/blog/remove-backgrounds-browser-rembg-webgpu)
 
+## Safari / iOS support
+
+Safari 26+ (macOS, iOS, iPadOS) ships WebGPU, and this fork runs the WebGPU
+FP16 path on it. Older Safari (≤ 18 / iOS ≤ 18) has no WebGPU and uses the
+WASM fallback. What makes this work:
+
+- **`@huggingface/transformers` v3.8.x is the recommended peer** for Safari.
+  v3 bundles ONNX Runtime's JSEP WebGPU backend, which works on WebKit.
+  v4 bundles ORT's newer WebGPU EP, which currently fails on WebKit
+  (`webgpuInit is not a function`) — and that failure corrupts ORT's WASM
+  backend in the same page. When v4 + WebKit is detected, this library
+  automatically skips WebGPU and goes straight to WASM (override with
+  `init({ allowWebGPU: true })` once ORT fixes WebKit support).
+- **WASM tier uses the quantized model** (q8, ~44MB) instead of fp32
+  (~176MB). On iOS the fp32 download + inference memory exceeded Safari's
+  per-tab budget and got the page killed and reloaded by the OS watchdog.
+- **iOS WASM runs at 512×512** (instead of 1024×1024) to stay inside the
+  memory budget on older iPhones. Override with `init({ processSize: 1024 })`.
+- **Runtime demotion** – any tier that fails to initialize, throws during
+  inference, or returns an all-zero mask before ever producing a valid one is
+  demoted down the ladder automatically.
+- Safari private browsing (no usable Cache API) no longer breaks model
+  loading; the model is simply re-downloaded per session.
+
+Verified via Playwright WebKit 26.5 (desktop + iPhone emulation): WebGPU FP16
+inference passes on transformers.js v3.8.1, and WASM q8 passes on both v3 and
+v4. Run the matrix yourself with `npm run test:browsers`, or try it
+interactively with `npm run demo` (use `?device=wasm&dtype=q8` to force a tier).
+
 ## Technical Details
 
 **Backend Selection**
 - Automatically detects WebGPU support and FP16 (shader-f16) capability
-- Falls back gracefully: WebGPU FP16 → WebGPU FP32 → WASM FP32
+- Falls back gracefully: WebGPU FP16 → WebGPU FP32 → WASM q8 → WASM FP32
+- `getCapabilityLadder()` returns the full ladder; `getActiveCapability()`
+  reports the tier actually in use after init
 
 **Performance Optimizations**
 - First call downloads and initializes the model on initial run-up; subsequent calls use memory + browser cache
@@ -117,9 +158,10 @@ unsubscribe();
 - [x] Memory + browser caching
 - [x] Offline-first architecture
 - [x] Full TypeScript support
+- [x] Safari (WebKit) support incl. WebGPU on Safari 26+
+- [x] Mobile-optimized version (quantized WASM tier, iOS memory guards)
 - [ ] Native batch processing API
 - [ ] Custom model support with zero-config
-- [ ] Mobile-optimized version
 
 ## Attribution
 

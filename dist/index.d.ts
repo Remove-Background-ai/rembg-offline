@@ -1,7 +1,7 @@
-import { init } from "./init.js";
+import { init, getActiveCapability, resetBackend, type InitOptions, type LoadedModel } from "./init.js";
 import { type ProgressState, type ProgressPhase } from "./progress.js";
-import { getCapabilities, type DeviceCapability } from "./capabilities.js";
-export type { ProgressState, ProgressPhase, DeviceCapability };
+import { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS, type CapabilityOptions, type DeviceCapability } from "./capabilities.js";
+export type { ProgressState, ProgressPhase, DeviceCapability, CapabilityOptions, InitOptions, LoadedModel };
 export type RemoveBackgroundResult = {
     blobUrl: string;
     previewUrl: string;
@@ -26,15 +26,18 @@ export declare function subscribeToProgress(listener: (state: ProgressState) => 
  * console.log(`Using ${capability.device} with ${capability.dtype}`);
  * ```
  */
-export { getCapabilities };
+export { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS };
 /**
  * Initialize the model (loads it into memory).
  * Can be called explicitly for eager loading, or will be called automatically on first removeBackground().
  *
- * The model will automatically use the best available backend (WebGPU with FP16 > WebGPU with FP32 > WASM).
- * Use getCapabilities() to check what will be used before calling init().
+ * The model will automatically use the best available backend
+ * (WebGPU FP16 > WebGPU FP32 > WASM q8 > WASM FP32), falling through the
+ * ladder when a tier fails to initialize — which happens on Safari/WebKit
+ * versions whose WebGPU implementation rejects ONNX Runtime's shaders.
+ * Use getCapabilities() to check what will be tried first.
  */
-export { init };
+export { init, getActiveCapability, resetBackend };
 /**
  * Remove background from an image URL.
  * - You provide your own file/upload UI.

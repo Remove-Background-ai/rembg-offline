@@ -1,7 +1,17 @@
 import { RawImage } from "@huggingface/transformers";
-import { init } from "./init.js";
+import { init, demoteBackend, markBackendVerified, getActiveCapability, resetBackend } from "./init.js";
 import { onnxProgress } from "./progress.js";
-import { getCapabilities } from "./capabilities.js";
+import { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS } from "./capabilities.js";
+// An entirely empty mask from an unverified backend is treated as backend
+// breakage (broken fp16/WebGPU paths yield NaN -> all-zero masks) rather than
+// a legitimately subject-free image, and triggers a fallback.
+function isAllZero(a) {
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== 0)
+            return false;
+    }
+    return true;
+}
 // Helper to run compositing in a worker (with OffscreenCanvas) when supported
 async function composeOffMainThread(bitmap, alpha, width, height) {
     return new Promise((resolve, reject) => {
@@ -156,15 +166,18 @@ export function subscribeToProgress(listener) {
  * console.log(`Using ${capability.device} with ${capability.dtype}`);
  * ```
  */
-export { getCapabilities };
+export { getCapabilities, getCapabilityLadder, isWebGPUSupported, isWebKit, isIOS };
 /**
  * Initialize the model (loads it into memory).
  * Can be called explicitly for eager loading, or will be called automatically on first removeBackground().
  *
- * The model will automatically use the best available backend (WebGPU with FP16 > WebGPU with FP32 > WASM).
- * Use getCapabilities() to check what will be used before calling init().
+ * The model will automatically use the best available backend
+ * (WebGPU FP16 > WebGPU FP32 > WASM q8 > WASM FP32), falling through the
+ * ladder when a tier fails to initialize — which happens on Safari/WebKit
+ * versions whose WebGPU implementation rejects ONNX Runtime's shaders.
+ * Use getCapabilities() to check what will be tried first.
  */
-export { init };
+export { init, getActiveCapability, resetBackend };
 /**
  * Remove background from an image URL.
  * - You provide your own file/upload UI.
@@ -174,18 +187,41 @@ export { init };
 export async function removeBackground(url) {
     if (!url)
         throw new Error("URL is empty");
-    const { model, processor } = await init();
     // Load the image (already resized as needed by the app using this library)
     const image = await RawImage.fromURL(url);
     const originalWidth = image.width;
     const originalHeight = image.height;
     const start = performance.now();
-    // Inference
-    const { pixel_values } = await processor(image);
-    const { output } = await model({ input: pixel_values });
-    // Prepare alpha mask in original size
-    const maskRaw = await RawImage.fromTensor(output[0].mul(255).to("uint8"));
-    const mask = await maskRaw.resize(originalWidth, originalHeight);
+    // Inference, with automatic backend demotion: a tier that throws — or
+    // returns an all-zero mask before it has ever produced a valid one (the
+    // classic silent fp16/WebGPU failure on WebKit) — is swapped for the next
+    // tier down the ladder and the inference is retried. Once a tier produces a
+    // valid mask it is considered verified and never demoted again.
+    let mask;
+    for (;;) {
+        const { model, processor } = await init();
+        try {
+            const { pixel_values } = await processor(image);
+            const { output } = await model({ input: pixel_values });
+            const maskRaw = await RawImage.fromTensor(output[0].mul(255).to("uint8"));
+            if (isAllZero(maskRaw.data) && await demoteBackend()) {
+                continue;
+            }
+            markBackendVerified();
+            // Prepare alpha mask in original size
+            mask = await maskRaw.resize(originalWidth, originalHeight);
+            if (maskRaw !== mask) {
+                // GC hint for the intermediate full-size mask
+                maskRaw.data = null;
+            }
+            break;
+        }
+        catch (e) {
+            if (await demoteBackend())
+                continue;
+            throw e;
+        }
+    }
     const alpha = mask.data;
     if (alpha.length !== originalWidth * originalHeight) {
         throw new Error("Mask size mismatch");

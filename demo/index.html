@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rembg-webgpu demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 720px; }
+    #out, #src { max-width: 100%; max-height: 300px; display: block; margin-top: .5rem;
+      background: repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 0 0 / 20px 20px; }
+    #status { white-space: pre-wrap; font-family: monospace; margin: .75rem 0; }
+    #status.error { color: #b00020; }
+    #status.done { color: #1a7f37; }
+    code { background: #f2f2f2; padding: 0 .25em; }
+    button { padding: .5rem 1rem; font-size: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>rembg-webgpu demo</h1>
+  <p>Capability ladder: <code id="cap">detecting…</code></p>
+  <p>Progress: <span id="progress">idle</span></p>
+  <p>
+    <button id="run-sample">Run on generated sample</button>
+    <input type="file" id="file" accept="image/*">
+  </p>
+  <div id="status">waiting</div>
+  <img id="src" alt="" hidden>
+  <img id="out" alt="" hidden>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

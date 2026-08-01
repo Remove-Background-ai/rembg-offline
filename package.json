@@ -1,6 +1,6 @@
 {
   "name": "rembg-webgpu",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Browser offline background removal using WebGPU - powered by rembg.com technology",
   "type": "module",
   "main": "dist/index.js",
@@ -14,14 +14,18 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "demo": "npm run build && vite demo",
+    "test:browsers": "npm run build && node scripts/test-browsers.mjs"
   },
   "peerDependencies": {
     "@huggingface/transformers": "^3 || ^4"
   },
-  "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "@huggingface/transformers": "^3.8.1",
+    "playwright": "^1.50.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
   },
   "keywords": [
     "background-removal",
@@ -44,12 +48,10 @@
   "license": "SEE LICENSE IN LICENSE FILE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Remove-Background-ai/rembg-webgpu.git"
+    "url": "https://github.com/popjam-io/rembg-webgpu.git"
   },
   "homepage": "https://www.rembg.com",
   "bugs": {
-    "url": "https://github.com/Remove-Background-ai/rembg-webgpu/issues"
+    "url": "https://github.com/popjam-io/rembg-webgpu/issues"
   }
 }
-
-
